@@ -1,0 +1,239 @@
+package helper
+
+import (
+	"archive/zip"
+	"bytes"
+	"database/sql"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+type Info struct {
+	Id         int
+	Name       string
+	Category   string
+	Price      float64
+	CreateDate time.Time
+}
+
+var KnownFields = map[string]struct{}{
+	"id":          struct{}{},
+	"name":        struct{}{},
+	"category":    struct{}{},
+	"price":       struct{}{},
+	"create_date": struct{}{},
+}
+
+// TODO: read from config? command-line args?
+const (
+	host     = "localhost"
+	port     = 5432
+	user     = "validator"
+	password = "val1dat0r"
+	dbname   = "project-sem-1"
+)
+
+func SaveReceivedFile(r *http.Request) (*os.File, error) {
+	contentTypeStuff := strings.Split(r.Header.Get("Content-Type"), ";")
+	fmt.Printf("Content-Type in request %v\n", contentTypeStuff[0])
+
+	if contentTypeStuff[0] != "multipart/form-data" {
+		errStr := fmt.Sprintf("no idea how to handle %v further", contentTypeStuff[0])
+		return nil, errors.New(errStr)
+	}
+
+	multipartFile, header, err := r.FormFile("file")
+
+	if err != nil {
+		errStr := fmt.Sprintf("error while trying to read file from POST request %v", err)
+		return nil, errors.New(errStr)
+	}
+
+	fmt.Printf("Content-Length from request is %d, header.Size %d\n", r.ContentLength, header.Size)
+
+	defer multipartFile.Close()
+
+	tempFilePath := filepath.Join("/tmp", header.Filename)
+	localFile, err := os.Create(tempFilePath)
+	if err != nil {
+		errStr := fmt.Sprintf("error while creating %s locally %v", header.Filename, err)
+		return nil, errors.New(errStr)
+	}
+
+	io.Copy(localFile, multipartFile)
+
+	return localFile, nil
+}
+
+func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
+
+	var unzipped []byte
+	zipReader, err := zip.OpenReader(localFile.Name())
+
+	fmt.Printf("localfile: %s\n", localFile.Name())
+	if err != nil {
+		errStr := fmt.Sprintf("error in zip.OpenReader() %v", err)
+		return nil, errors.New(errStr)
+	}
+	defer zipReader.Close()
+
+	wdPath, err := os.Getwd()
+	if err != nil {
+		errStr := fmt.Sprintf("failed to get working directory path: %v", err)
+		return nil, errors.New(errStr)
+	}
+
+	fmt.Printf("Working Directory: %s\n", wdPath)
+
+	for _, f := range zipReader.File {
+		filename := filepath.Base(f.Name)
+		fmt.Printf("filename: %s\n", filename)
+
+		if filename == "data.csv" {
+
+			readCloser, err := f.Open()
+			if err != nil {
+				errStr := fmt.Sprintf("error in Open(): %v", err)
+				return nil, errors.New(errStr)
+			}
+
+			unzipped = make([]byte, f.FileInfo().Size())
+			actuallyReadBytes, err := readCloser.Read(unzipped)
+			if err != nil && err != io.EOF {
+				errStr := fmt.Sprintf("error in readCloser.Read(): %v", err)
+				return nil, errors.New(errStr)
+			}
+
+			fmt.Printf("Read %d bytes from %s\n", actuallyReadBytes, filename)
+
+			readCloser.Close()
+
+			// fmt.Printf("Unzipped: %s\n", unzipped)
+			break // no need to read further
+		}
+	}
+
+	if len(unzipped) == 0 {
+		return nil, errors.New("no data.csv in provided archive")
+	}
+
+	return unzipped, nil
+}
+
+func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
+	var records []Info
+
+	byteReader := bytes.NewReader(csvBytes)
+	csvReader := csv.NewReader(byteReader)
+
+	lastRecord := false
+	recordNumber := 0
+	IndexToKnownFields := make(map[int]string)
+
+	for lastRecord == false {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			lastRecord = true
+			break
+		}
+
+		fmt.Printf("Current record number %d\n", recordNumber)
+
+		if recordNumber == 0 {
+			// this is a header with column names
+			if len(record) != len(KnownFields) {
+				errStr := fmt.Sprintf("amount of columns in csv %d does not match amount of necessary fields %d", len(record), len(KnownFields))
+				return nil, errors.New(errStr)
+			}
+
+			for indx, fieldName := range record {
+				fmt.Printf("Read fieldName %s\n", fieldName)
+				_, found := KnownFields[fieldName]
+				if !found {
+					errStr := fmt.Sprintf("unexpected field name %s in the heading record of csv", fieldName)
+					return nil, errors.New(errStr)
+				}
+
+				IndexToKnownFields[indx] = fieldName
+			}
+
+		} else {
+
+			var currentInfo Info
+			for i, value := range record {
+				switch IndexToKnownFields[i] {
+				case "id":
+					currentInfo.Id, err = strconv.Atoi(value)
+					if err != nil {
+						errStr := fmt.Sprintf("failed parsing id %v", err)
+						return nil, errors.New(errStr)
+					}
+				case "name":
+					currentInfo.Name = value
+				case "category":
+					currentInfo.Category = value
+				case "price":
+					currentInfo.Price, err = strconv.ParseFloat(value, 64)
+					if err != nil {
+						errStr := fmt.Sprintf("failed parsing price %v", err)
+						return nil, errors.New(errStr)
+					}
+				case "create_date":
+					currentInfo.CreateDate, err = time.Parse("2006-01-02", value)
+					if err != nil {
+						errStr := fmt.Sprintf("failed parsing date %v", err)
+						return nil, errors.New(errStr)
+					}
+				}
+			}
+
+			fmt.Printf("Current info %v\n", currentInfo)
+
+			records = append(records, currentInfo)
+		}
+
+		recordNumber++
+	}
+
+	return records, nil
+
+}
+
+func InsertToBase(records []Info) error {
+
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
+
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	sqlStatement := `
+INSERT INTO prices (id, name, category, price, create_date)
+VALUES ($1, $2, $3, $4, $5)`
+
+	for _, record := range records {
+
+		result, err := db.Exec(sqlStatement, record.Id, record.Name, record.Category, record.Price, record.CreateDate)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("Result of insert:", result)
+	}
+
+	return nil
+}
