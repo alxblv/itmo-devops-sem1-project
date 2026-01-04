@@ -15,11 +15,10 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		fmt.Fprintf(w, "GET request was processed")
 	case "POST":
-		fmt.Fprintf(w, "POST request was processed")
-
 		localFile, err := helper.SaveReceivedFile(r)
 		if err != nil {
 			log.Printf("error in SaveReceivedFile() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -28,6 +27,7 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 		csvBytes, err := helper.UnzipAndStoreCSV(localFile)
 		if err != nil {
 			log.Printf("error in UnzipAndStoreCSV() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -36,9 +36,10 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Printf("obtained CSV: %s\n", csvBytes)
 
-		records, err := helper.ParseCsvToSliceOfStructs(csvBytes)
+		records, stats, err := helper.ParseCsvToSliceOfStructs(csvBytes)
 		if err != nil {
 			log.Printf("error in ParseCsvToSliceOfStructs() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -47,6 +48,13 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 		err = helper.InsertToBase(records)
 		if err != nil {
 			log.Printf("error in InsertToBase() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		err = helper.SendResponse(w, stats)
+		if err != nil {
+			log.Printf("error in SendResponse() %v", err)
 			return
 		}
 

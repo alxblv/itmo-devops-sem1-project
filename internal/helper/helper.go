@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +36,12 @@ var KnownFields = map[string]struct{}{
 	"create_date": struct{}{},
 }
 
+type Stats struct {
+	TotalItems      int `json:"total_items"`
+	TotalCategories int `json:"total_categories"`
+	TotalPrice      int `json:"total_price"`
+}
+
 // TODO: read from config? command-line args?
 const (
 	host     = "localhost"
@@ -49,6 +57,7 @@ func SaveReceivedFile(r *http.Request) (*os.File, error) {
 
 	if contentTypeStuff[0] != "multipart/form-data" {
 		errStr := fmt.Sprintf("no idea how to handle %v further", contentTypeStuff[0])
+		log.Println(errStr)
 		return nil, errors.New(errStr)
 	}
 
@@ -56,6 +65,7 @@ func SaveReceivedFile(r *http.Request) (*os.File, error) {
 
 	if err != nil {
 		errStr := fmt.Sprintf("error while trying to read file from POST request %v", err)
+		log.Println(errStr)
 		return nil, errors.New(errStr)
 	}
 
@@ -67,6 +77,7 @@ func SaveReceivedFile(r *http.Request) (*os.File, error) {
 	localFile, err := os.Create(tempFilePath)
 	if err != nil {
 		errStr := fmt.Sprintf("error while creating %s locally %v", header.Filename, err)
+		log.Println(errStr)
 		return nil, errors.New(errStr)
 	}
 
@@ -83,6 +94,7 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 	fmt.Printf("localfile: %s\n", localFile.Name())
 	if err != nil {
 		errStr := fmt.Sprintf("error in zip.OpenReader() %v", err)
+		log.Println(errStr)
 		return nil, errors.New(errStr)
 	}
 	defer zipReader.Close()
@@ -90,6 +102,7 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 	wdPath, err := os.Getwd()
 	if err != nil {
 		errStr := fmt.Sprintf("failed to get working directory path: %v", err)
+		log.Println(errStr)
 		return nil, errors.New(errStr)
 	}
 
@@ -104,6 +117,7 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 			readCloser, err := f.Open()
 			if err != nil {
 				errStr := fmt.Sprintf("error in Open(): %v", err)
+				log.Println(errStr)
 				return nil, errors.New(errStr)
 			}
 
@@ -111,6 +125,7 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 			actuallyReadBytes, err := readCloser.Read(unzipped)
 			if err != nil && err != io.EOF {
 				errStr := fmt.Sprintf("error in readCloser.Read(): %v", err)
+				log.Println(errStr)
 				return nil, errors.New(errStr)
 			}
 
@@ -130,8 +145,12 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 	return unzipped, nil
 }
 
-func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
+func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, []byte, error) {
 	var records []Info
+	var jsStats []byte
+	var stats Stats
+
+	uniqueCategories := make(map[string]struct{})
 
 	byteReader := bytes.NewReader(csvBytes)
 	csvReader := csv.NewReader(byteReader)
@@ -153,7 +172,8 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 			// this is a header with column names
 			if len(record) != len(KnownFields) {
 				errStr := fmt.Sprintf("amount of columns in csv %d does not match amount of necessary fields %d", len(record), len(KnownFields))
-				return nil, errors.New(errStr)
+				log.Println(errStr)
+				return nil, nil, errors.New(errStr)
 			}
 
 			for indx, fieldName := range record {
@@ -161,7 +181,8 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 				_, found := KnownFields[fieldName]
 				if !found {
 					errStr := fmt.Sprintf("unexpected field name %s in the heading record of csv", fieldName)
-					return nil, errors.New(errStr)
+					log.Println(errStr)
+					return nil, nil, errors.New(errStr)
 				}
 
 				IndexToKnownFields[indx] = fieldName
@@ -175,29 +196,45 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 				case "id":
 					currentInfo.Id, err = strconv.Atoi(value)
 					if err != nil {
-						errStr := fmt.Sprintf("failed parsing id %v", err)
-						return nil, errors.New(errStr)
+						// errStr := fmt.Sprintf("failed parsing id %v", err)
+						// return nil, errors.New(errStr)
+						log.Printf("failed to parse id: %v", err)
+						continue
 					}
 				case "name":
 					currentInfo.Name = value
 				case "category":
 					currentInfo.Category = value
+
 				case "price":
 					currentInfo.Price, err = strconv.ParseFloat(value, 64)
 					if err != nil {
-						errStr := fmt.Sprintf("failed parsing price %v", err)
-						return nil, errors.New(errStr)
+						//errStr := fmt.Sprintf("failed parsing price %v", err)
+						//return nil, errors.New(errStr)
+						log.Printf("failed to parse price for item with id %d: %v", currentInfo.Id, err)
+						continue
 					}
 				case "create_date":
 					currentInfo.CreateDate, err = time.Parse("2006-01-02", value)
 					if err != nil {
-						errStr := fmt.Sprintf("failed parsing date %v", err)
-						return nil, errors.New(errStr)
+						// errStr := fmt.Sprintf("failed parsing date %v", err)
+						// return nil, errors.New(errStr)
+						log.Printf("failed to parse create_date for item with id %d: %v", currentInfo.Id, err)
+						continue
 					}
 				}
 			}
 
 			fmt.Printf("Current info %v\n", currentInfo)
+
+			// TODO: separate function to fill stats?
+			stats.TotalItems++
+			_, found := uniqueCategories[currentInfo.Category]
+			if !found {
+				stats.TotalCategories++
+				uniqueCategories[currentInfo.Category] = struct{}{}
+			}
+			stats.TotalPrice += int(currentInfo.Price)
 
 			records = append(records, currentInfo)
 		}
@@ -205,8 +242,14 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 		recordNumber++
 	}
 
-	return records, nil
+	jsStats, err := json.Marshal(stats)
+	if err != nil {
+		// TODO: how do we handle this situation outside?
+		log.Printf("error while marshalling json %v", err)
+	}
+	// fmt.Printf("Current jsStats %s\n", jsStats)
 
+	return records, jsStats, nil
 }
 
 func InsertToBase(records []Info) error {
@@ -217,6 +260,7 @@ func InsertToBase(records []Info) error {
 
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
+		log.Printf("failed to opend db %v", err)
 		return err
 	}
 	defer db.Close()
@@ -229,6 +273,7 @@ VALUES ($1, $2, $3, $4, $5)`
 
 		result, err := db.Exec(sqlStatement, record.Id, record.Name, record.Category, record.Price, record.CreateDate)
 		if err != nil {
+			log.Printf("failed to execute a query %v", err)
 			return err
 		}
 
@@ -236,4 +281,11 @@ VALUES ($1, $2, $3, $4, $5)`
 	}
 
 	return nil
+}
+
+func SendResponse(w http.ResponseWriter, stats []byte) error {
+
+	w.Header().Set("Content-Type", "application/json")
+	_, err := w.Write(stats)
+	return err
 }
