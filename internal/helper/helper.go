@@ -52,6 +52,14 @@ const (
 	dbname   = "project-sem-1"
 )
 
+var psqlInfo string
+
+func PrepareDbConnectionInfo() {
+	psqlInfo = fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
+}
+
 func SaveReceivedFile(r *http.Request) (*os.File, error) {
 	contentTypeStuff := strings.Split(r.Header.Get("Content-Type"), ";")
 	fmt.Printf("Content-Type in request %v\n", contentTypeStuff[0])
@@ -235,10 +243,6 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 
 func InsertToBase(records []Info) error {
 
-	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
-		"password=%s dbname=%s sslmode=disable",
-		host, port, user, password, dbname)
-
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
 		log.Printf("failed to opend db %v", err)
@@ -267,10 +271,6 @@ VALUES ($1, $2, $3, $4, $5)`
 func CollectTotalStatsFromBase() ([]byte, error) {
 	var jsStats []byte
 	var stats Stats
-
-	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
-		"password=%s dbname=%s sslmode=disable",
-		host, port, user, password, dbname)
 
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {

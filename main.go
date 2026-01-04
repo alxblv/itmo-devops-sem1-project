@@ -72,6 +72,7 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	log.SetFlags(log.Llongfile)
+	helper.PrepareDbConnectionInfo()
 	mux := http.NewServeMux()
 	mux.HandleFunc(`/api/v0/prices`, pricesHandler)
 
