@@ -30,9 +30,16 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 		fileinfo, _ := dataFile.Stat()
 		fmt.Printf("Size of obtained CSV file %s is %d\n", dataFile.Name(), fileinfo.Size())
 
-		err = helper.ZipBuiltCSV(dataFile)
+		archive, err := helper.ZipBuiltCSV(dataFile)
 		if err != nil {
 			log.Printf("error in ZipBuiltCSV() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		err = helper.SendResponseToGet(w, archive)
+		if err != nil {
+			log.Printf("error in SendResponseToGet() %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
