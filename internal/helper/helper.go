@@ -29,6 +29,10 @@ type Info struct {
 	CreateDate time.Time
 }
 
+const dataFileName string = "data.csv"
+const zipFileName string = "data.zip"
+const tempPath string = "/tmp"
+
 var KnownFields = map[string]struct{}{
 	"id":          struct{}{},
 	"name":        struct{}{},
@@ -82,7 +86,7 @@ func SaveReceivedFile(r *http.Request) (*os.File, error) {
 
 	defer multipartFile.Close()
 
-	tempFilePath := filepath.Join("/tmp", header.Filename)
+	tempFilePath := filepath.Join(tempPath, header.Filename)
 	localFile, err := os.Create(tempFilePath)
 	if err != nil {
 		errStr := fmt.Sprintf("error while creating %s locally %v", header.Filename, err)
@@ -96,6 +100,9 @@ func SaveReceivedFile(r *http.Request) (*os.File, error) {
 }
 
 func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
+
+	defer localFile.Close()
+	defer os.Remove(localFile.Name())
 
 	var unzipped []byte
 	zipReader, err := zip.OpenReader(localFile.Name())
@@ -121,7 +128,7 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 		filename := filepath.Base(f.Name)
 		fmt.Printf("filename: %s\n", filename)
 
-		if filename == "data.csv" {
+		if filename == dataFileName {
 
 			readCloser, err := f.Open()
 			if err != nil {
@@ -327,9 +334,144 @@ FROM prices`
 	return jsStats, nil
 }
 
-func SendResponse(w http.ResponseWriter, stats []byte) error {
+func SendResponseToPost(w http.ResponseWriter, stats []byte) error {
 
 	w.Header().Set("Content-Type", "application/json")
 	_, err := w.Write(stats)
 	return err
+}
+
+func CollectPricesRecordsFromBase() ([]Info, error) {
+	var records []Info
+
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		log.Printf("failed to opend db %v", err)
+		return nil, err
+	}
+	defer db.Close()
+
+	sqlSelectPricesFromDb := `
+SELECT *
+FROM prices`
+
+	rows, err := db.Query(sqlSelectPricesFromDb)
+	if err != nil {
+		log.Printf("failed while getting prices table from db: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var record Info
+		err = rows.Scan(&record.Id, &record.Name, &record.Category, &record.Price, &record.CreateDate)
+		if err != nil {
+			log.Printf("failed scanning results of select-from-prices query: %v", err)
+			return nil, err
+		}
+		fmt.Println(record)
+		records = append(records, record)
+	}
+
+	return records, nil
+}
+
+func BuildCsvFile(records []Info) (*os.File, error) {
+
+	tempFilePath := filepath.Join(tempPath, dataFileName)
+	file, err := os.Create(tempFilePath)
+	if err != nil {
+		errStr := fmt.Sprintf("error in Create(): %v", err)
+		log.Println(errStr)
+		return nil, errors.New(errStr)
+	}
+
+	csvWriter := csv.NewWriter(file)
+
+	// first write heading line
+	var headingLine []string
+
+	for columnName := range KnownFields {
+		headingLine = append(headingLine, columnName)
+	}
+
+	err = csvWriter.Write(headingLine)
+	if err != nil {
+		errStr := fmt.Sprintf("csvWriter failed to Write() heading line: %v", err)
+		log.Println(errStr)
+		file.Close()
+		os.Remove(file.Name())
+		return nil, errors.New(errStr)
+	}
+
+	csvWriter.Flush()
+
+	for index, record := range records {
+		var singleLine []string
+
+		idInStr := strconv.Itoa(record.Id)
+		singleLine = append(singleLine, idInStr)
+
+		singleLine = append(singleLine, record.Name)
+		singleLine = append(singleLine, record.Category)
+
+		priceInStr := strconv.FormatFloat(record.Price, 'f', 2, 64)
+		singleLine = append(singleLine, priceInStr)
+
+		singleLine = append(singleLine, record.CreateDate.Format("2006-01-02"))
+
+		fmt.Printf("Record %d prepared for CSV writer %v\n", index, singleLine)
+
+		err := csvWriter.Write(singleLine)
+		if err != nil {
+			errStr := fmt.Sprintf("csvWriter failed to Write(): %v", err)
+			log.Println(errStr)
+			file.Close()
+			os.Remove(file.Name())
+			return nil, errors.New(errStr)
+		}
+
+		csvWriter.Flush()
+
+	}
+
+	fmt.Printf("BuildCsvFile() of %s done: wrote %d records\n", tempFilePath, len(records))
+	return file, nil
+}
+
+func ZipBuiltCSV(dataFile *os.File) error {
+
+	defer dataFile.Close()
+	defer os.Remove(dataFile.Name())
+
+	archive, err := os.Create(filepath.Join(tempPath, zipFileName))
+	if err != nil {
+		errStr := fmt.Sprintf("ZipBuiltCSV() failed creating an archive: %v", err)
+		log.Println(errStr)
+		return err
+	}
+	defer archive.Close()
+
+	zipWriter := zip.NewWriter(archive)
+	defer zipWriter.Close()
+
+	fileWriter, err := zipWriter.Create(dataFileName)
+	if err != nil {
+		errStr := fmt.Sprintf("ZipBuiltCSV() failed creating a file in the archive: %v", err)
+		log.Println(errStr)
+		return err
+	}
+
+	dataFile.Seek(0, io.SeekStart) // otherwise will try to copy starting from the position where we finished writing, i.e. nothing
+
+	bytesCopied, err := io.Copy(fileWriter, dataFile)
+	if err != nil {
+		errStr := fmt.Sprintf("ZipBuiltCSV() failed to Copy(): %v", err)
+		log.Println(errStr)
+		return err
+	}
+
+	fmt.Printf("ZipBuiltCSV() copied %d bytes to csv-file in archive\n", bytesCopied)
+
+	return nil
 }

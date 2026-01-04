@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"internal/helper"
 )
@@ -13,7 +12,31 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		fmt.Fprintf(w, "GET request was processed")
+
+		records, err := helper.CollectPricesRecordsFromBase()
+		if err != nil {
+			log.Printf("error in CollectPricesRecordsFromBase() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		dataFile, err := helper.BuildCsvFile(records)
+		if err != nil {
+			log.Printf("error in BuildCsvFile() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		fileinfo, _ := dataFile.Stat()
+		fmt.Printf("Size of obtained CSV file %s is %d\n", dataFile.Name(), fileinfo.Size())
+
+		err = helper.ZipBuiltCSV(dataFile)
+		if err != nil {
+			log.Printf("error in ZipBuiltCSV() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
 	case "POST":
 		localFile, err := helper.SaveReceivedFile(r)
 		if err != nil {
@@ -22,17 +45,12 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		defer localFile.Close()
-
 		csvBytes, err := helper.UnzipAndStoreCSV(localFile)
 		if err != nil {
 			log.Printf("error in UnzipAndStoreCSV() %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
-		fmt.Printf("gonna remove file %s\n", localFile.Name())
-		os.Remove(localFile.Name()) // no need to keep file anymore
 
 		fmt.Printf("obtained CSV: %s\n", csvBytes)
 
@@ -59,9 +77,9 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = helper.SendResponse(w, stats)
+		err = helper.SendResponseToPost(w, stats)
 		if err != nil {
-			log.Printf("error in SendResponse() %v", err)
+			log.Printf("error in SendResponseToPost() %v", err)
 			return
 		}
 
