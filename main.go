@@ -36,7 +36,7 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Printf("obtained CSV: %s\n", csvBytes)
 
-		records, stats, err := helper.ParseCsvToSliceOfStructs(csvBytes)
+		records, err := helper.ParseCsvToSliceOfStructs(csvBytes)
 		if err != nil {
 			log.Printf("error in ParseCsvToSliceOfStructs() %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -48,6 +48,13 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 		err = helper.InsertToBase(records)
 		if err != nil {
 			log.Printf("error in InsertToBase() %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		stats, err := helper.CollectTotalStatsFromBase()
+		if err != nil {
+			log.Printf("error in CollectTotalStatsFromBase() %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}

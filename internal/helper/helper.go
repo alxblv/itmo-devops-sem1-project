@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -145,12 +146,8 @@ func UnzipAndStoreCSV(localFile *os.File) ([]byte, error) {
 	return unzipped, nil
 }
 
-func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, []byte, error) {
+func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, error) {
 	var records []Info
-	var jsStats []byte
-	var stats Stats
-
-	uniqueCategories := make(map[string]struct{})
 
 	byteReader := bytes.NewReader(csvBytes)
 	csvReader := csv.NewReader(byteReader)
@@ -173,7 +170,7 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, []byte, error) {
 			if len(record) != len(KnownFields) {
 				errStr := fmt.Sprintf("amount of columns in csv %d does not match amount of necessary fields %d", len(record), len(KnownFields))
 				log.Println(errStr)
-				return nil, nil, errors.New(errStr)
+				return nil, errors.New(errStr)
 			}
 
 			for indx, fieldName := range record {
@@ -182,7 +179,7 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, []byte, error) {
 				if !found {
 					errStr := fmt.Sprintf("unexpected field name %s in the heading record of csv", fieldName)
 					log.Println(errStr)
-					return nil, nil, errors.New(errStr)
+					return nil, errors.New(errStr)
 				}
 
 				IndexToKnownFields[indx] = fieldName
@@ -227,29 +224,13 @@ func ParseCsvToSliceOfStructs(csvBytes []byte) ([]Info, []byte, error) {
 
 			fmt.Printf("Current info %v\n", currentInfo)
 
-			// TODO: separate function to fill stats?
-			stats.TotalItems++
-			_, found := uniqueCategories[currentInfo.Category]
-			if !found {
-				stats.TotalCategories++
-				uniqueCategories[currentInfo.Category] = struct{}{}
-			}
-			stats.TotalPrice += int(currentInfo.Price)
-
 			records = append(records, currentInfo)
 		}
 
 		recordNumber++
 	}
 
-	jsStats, err := json.Marshal(stats)
-	if err != nil {
-		// TODO: how do we handle this situation outside?
-		log.Printf("error while marshalling json %v", err)
-	}
-	// fmt.Printf("Current jsStats %s\n", jsStats)
-
-	return records, jsStats, nil
+	return records, nil
 }
 
 func InsertToBase(records []Info) error {
@@ -281,6 +262,69 @@ VALUES ($1, $2, $3, $4, $5)`
 	}
 
 	return nil
+}
+
+func CollectTotalStatsFromBase() ([]byte, error) {
+	var jsStats []byte
+	var stats Stats
+
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
+
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		log.Printf("failed to opend db %v", err)
+		return nil, err
+	}
+	defer db.Close()
+
+	sqlTotalItemsInDb := `
+SELECT COUNT(id)
+FROM prices`
+
+	err = db.QueryRow(sqlTotalItemsInDb).Scan(&stats.TotalItems)
+
+	if err != nil {
+		log.Printf("failed while quering for total items: %v", err)
+		return nil, err
+	}
+
+	sqlTotalCategoriesInDb := `
+SELECT COUNT(DISTINCT category)
+FROM prices`
+
+	err = db.QueryRow(sqlTotalCategoriesInDb).Scan(&stats.TotalCategories)
+
+	if err != nil {
+		log.Printf("failed while quering for total categories: %v", err)
+		return nil, err
+	}
+
+	sqlTotalPriceInDb := `
+SELECT SUM(price)
+FROM prices`
+
+	var totalPriceFloat float64
+	err = db.QueryRow(sqlTotalPriceInDb).Scan(&totalPriceFloat)
+
+	if err != nil {
+		log.Printf("failed while quering for total price: %v", err)
+		return nil, err
+	}
+
+	// do they expect us to round it or simply drop fractional part?
+	stats.TotalPrice = int(math.Round(totalPriceFloat))
+
+	jsStats, err = json.Marshal(stats)
+	if err != nil {
+		log.Printf("error while marshalling json %v", err)
+		return nil, err
+	}
+
+	// fmt.Printf("Current jsStats %s\n", jsStats)
+
+	return jsStats, nil
 }
 
 func SendResponse(w http.ResponseWriter, stats []byte) error {
